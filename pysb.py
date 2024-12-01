@@ -1,10 +1,11 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.stats import chi2
-import statsmodels.api as sm
+
 
 def pysb(y, min_pct=0.15):
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy.stats import chi2
+    import statsmodels.api as sm
     """
     Performs a Supremum Wald Test for unknown break dates in a single time series and visualizes 
     the original time series with the breakpoint, preserving the datetime index.
