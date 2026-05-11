@@ -1,87 +1,238 @@
-
-
-def pysb(y, min_pct=0.15):
+def pysb(
+    y,
+    min_pct=0.15,
+    alpha=0.05,
+    max_breaks=None,
+    plot=True
+):
     import pandas as pd
     import numpy as np
     import matplotlib.pyplot as plt
     from scipy.stats import chi2
     import statsmodels.api as sm
+
     """
-    Performs a Supremum Wald Test for unknown break dates in a single time series and visualizes 
-    the original time series with the breakpoint, preserving the datetime index.
+    Detecta múltiplas quebras estruturais em uma série temporal usando
+    Supremum Wald Test com Binary Segmentation.
 
-    Parameters:
-    - y: The time series (as a pandas Series with datetime index).
-    - min_pct: Minimum percentage of observations before and after a breakpoint to be considered valid.
+    Parâmetros
+    ----------
+    y : pd.Series
+        Série temporal com índice datetime.
 
-    Returns:
-    - sup_wald_stat: The supremum of the Wald test statistics.
-    - breakpoint: The datetime index of the most significant break date.
-    - p_value: The p-value of the Supremum Wald statistic.
+    min_pct : float
+        Percentual mínimo de observações antes e depois de cada possível quebra.
+
+    alpha : float
+        Nível de significância para aceitar uma quebra estrutural.
+
+    max_breaks : int ou None
+        Número máximo de quebras estruturais permitidas.
+        Se None, detecta enquanto houver quebras significativas.
+
+    plot : bool
+        Se True, plota a série com as quebras detectadas.
+
+    Retorna
+    -------
+    results : pd.DataFrame
+        DataFrame com as quebras detectadas, estatística Wald e p-valor.
     """
 
-    # Ensure y is a pandas Series with a datetime index
+    # ============================================================
+    # Validações iniciais
+    # ============================================================
+
     if not isinstance(y, pd.Series):
         raise ValueError("y must be a pandas Series with a datetime index")
 
-    # Store the datetime index for plotting
-    dates = y.index
+    if not isinstance(y.index, pd.DatetimeIndex):
+        raise ValueError("y must have a datetime index")
 
-    # Convert the values of y to a numpy array for processing
+    y = y.dropna().copy()
+    y = y.sort_index()
+
+    dates = y.index
     y_values = y.values
 
-    # Length of the time series
-    n = len(y_values)
+    # ============================================================
+    # Função interna: detecta 1 break em uma subamostra
+    # ============================================================
 
-    # Define the minimum and maximum possible breakpoints
-    min_obs = int(np.floor(n * min_pct))
-    max_obs = n - min_obs
+    def single_sup_wald(y_sub, offset=0):
+        """
+        Aplica Supremum Wald Test em uma subamostra.
+        Retorna a melhor quebra dentro daquela subamostra.
+        """
 
-    # Initialize lists to store the Wald statistics and corresponding breakpoints
-    wald_stats = []
-    breakpoints = []
+        n = len(y_sub)
 
-    for b in range(min_obs, max_obs):
-        # Fit the models before and after the breakpoint (mean changes model)
-        model1 = sm.OLS(y_values[:b], np.ones(b)).fit()
-        model2 = sm.OLS(y_values[b:], np.ones(n - b)).fit()
+        min_obs = int(np.floor(n * min_pct))
+        max_obs = n - min_obs
 
-        # Get the residual sum of squares for both models
-        RSS1 = np.sum(model1.resid ** 2)
-        RSS2 = np.sum(model2.resid ** 2)
+        if min_obs < 2 or max_obs <= min_obs:
+            return None
 
-        # Combine the residuals to get the total RSS
-        RSS_total = RSS1 + RSS2
+        wald_stats = []
+        breakpoints = []
 
-        # Estimate the unrestricted model (whole period)
-        model_full = sm.OLS(y_values, np.ones(n)).fit()
+        model_full = sm.OLS(y_sub, np.ones(n)).fit()
         RSS_full = np.sum(model_full.resid ** 2)
 
-        # Compute the Wald statistic (for structural change in mean)
-        k = 1  # number of parameters (just the mean in this case)
-        wald_stat = (RSS_full - RSS_total) / k / (RSS_total / (n - 2 * k))
+        k = 1
 
-        # Append Wald statistic and breakpoint
-        wald_stats.append(wald_stat)
-        breakpoints.append(b)
+        for b in range(min_obs, max_obs):
 
-    # Find the supremum Wald statistic and the corresponding breakpoint
-    sup_wald_stat = max(wald_stats)
-    breakpoint_index = breakpoints[wald_stats.index(sup_wald_stat)]
-    breakpoint = dates[breakpoint_index]  # Get the actual datetime corresponding to the breakpoint
+            y1 = y_sub[:b]
+            y2 = y_sub[b:]
 
-    # Calculate p-value using chi-square distribution
-    p_value = 1 - chi2.cdf(sup_wald_stat, df=k)
+            if len(y1) <= k or len(y2) <= k:
+                continue
 
-    # Visualization of the original time series with the detected breakpoint
-    plt.figure(figsize=(10, 6))
-    plt.plot(dates, y_values, label='Time Series', color='blue', marker='o')
-    plt.axvline(breakpoint, color='red', linestyle='--', label=f'Breakpoint: {breakpoint.date()}')
-    plt.title('Time Series with Supremum Wald Test Breakpoint')
-    plt.xlabel('Date')
-    plt.ylabel('Value')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+            model1 = sm.OLS(y1, np.ones(len(y1))).fit()
+            model2 = sm.OLS(y2, np.ones(len(y2))).fit()
 
-    return sup_wald_stat, breakpoint, p_value
+            RSS1 = np.sum(model1.resid ** 2)
+            RSS2 = np.sum(model2.resid ** 2)
+
+            RSS_total = RSS1 + RSS2
+
+            denominator = RSS_total / (n - 2 * k)
+
+            if denominator == 0:
+                continue
+
+            wald_stat = ((RSS_full - RSS_total) / k) / denominator
+
+            wald_stats.append(wald_stat)
+            breakpoints.append(b)
+
+        if not wald_stats:
+            return None
+
+        sup_wald_stat = max(wald_stats)
+        local_break_index = breakpoints[wald_stats.index(sup_wald_stat)]
+        global_break_index = offset + local_break_index
+
+        p_value = 1 - chi2.cdf(sup_wald_stat, df=k)
+
+        return {
+            "break_index": global_break_index,
+            "local_break_index": local_break_index,
+            "break_date": dates[global_break_index],
+            "sup_wald_stat": sup_wald_stat,
+            "p_value": p_value,
+            "segment_start_index": offset,
+            "segment_end_index": offset + n - 1,
+            "segment_start_date": dates[offset],
+            "segment_end_date": dates[offset + n - 1],
+            "n_segment": n
+        }
+
+    # ============================================================
+    # Função interna: binary segmentation recursivo
+    # ============================================================
+
+    detected_breaks = []
+
+    def recursive_search(start_idx, end_idx):
+        """
+        Busca quebras em um intervalo da série.
+        """
+
+        if max_breaks is not None and len(detected_breaks) >= max_breaks:
+            return
+
+        y_sub = y_values[start_idx:end_idx + 1]
+
+        n_sub = len(y_sub)
+
+        min_required = max(10, int(2 / min_pct))
+
+        if n_sub < min_required:
+            return
+
+        result = single_sup_wald(y_sub, offset=start_idx)
+
+        if result is None:
+            return
+
+        if result["p_value"] < alpha:
+
+            detected_breaks.append(result)
+
+            b = result["break_index"]
+
+            recursive_search(start_idx, b - 1)
+            recursive_search(b, end_idx)
+
+    # ============================================================
+    # Executa busca recursiva
+    # ============================================================
+
+    recursive_search(0, len(y_values) - 1)
+
+    # ============================================================
+    # Organiza resultados
+    # ============================================================
+
+    if detected_breaks:
+        results = pd.DataFrame(detected_breaks)
+
+        results = results.sort_values("break_date").reset_index(drop=True)
+
+        results = results[
+            [
+                "break_date",
+                "break_index",
+                "sup_wald_stat",
+                "p_value",
+                "segment_start_date",
+                "segment_end_date",
+                "n_segment"
+            ]
+        ]
+
+    else:
+        results = pd.DataFrame(
+            columns=[
+                "break_date",
+                "break_index",
+                "sup_wald_stat",
+                "p_value",
+                "segment_start_date",
+                "segment_end_date",
+                "n_segment"
+            ]
+        )
+
+    # ============================================================
+    # Plot
+    # ============================================================
+
+    if plot:
+        plt.figure(figsize=(12, 6))
+
+        plt.plot(
+            dates,
+            y_values,
+            label="Time Series",
+            #marker="--"
+        )
+
+        if not results.empty:
+            for _, row in results.iterrows():
+                plt.axvline(
+                    row["break_date"],
+                    linestyle="--",
+                    label=f"Break: {row['break_date'].date()}"
+                )
+
+        plt.title("Time Series with Multiple Structural Breaks")
+        plt.xlabel("Date")
+        plt.ylabel("Value")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
+    return results
